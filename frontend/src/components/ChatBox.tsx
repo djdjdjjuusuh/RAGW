@@ -8,10 +8,25 @@ interface ChatBoxProps {
   onConversationUpdated: () => void
 }
 
-// 简单的 Markdown 解析函数
+// 增强的 Markdown 解析函数
 const parseMarkdown = (text: string): JSX.Element[] => {
   const lines = text.split('\n')
   const elements: JSX.Element[] = []
+  
+  const parseInlineFormatting = (content: string): string => {
+    let result = content
+    
+    // 处理粗斜体组合 ***text***
+    result = result.replace(/\*\*\*(.*?)\*\*\*/g, '<strong><em>$1</em></strong>')
+    
+    // 处理粗体 **text**
+    result = result.replace(/\*\*(.*?)\*\*/g, '<strong>$1</strong>')
+    
+    // 处理斜体 *text*
+    result = result.replace(/\*(.*?)\*/g, '<em>$1</em>')
+    
+    return result
+  }
   
   for (let i = 0; i < lines.length; i++) {
     const line = lines[i]
@@ -20,18 +35,19 @@ const parseMarkdown = (text: string): JSX.Element[] => {
     if (line.match(/^#{1,6}\s/)) {
       const level = (line.match(/^#+/))?.[0].length || 1
       const content = line.replace(/^#{1,6}\s/, '')
+      const parsedContent = parseInlineFormatting(content)
       switch (level) {
         case 1:
-          elements.push(<h1 key={i}>{content}</h1>)
+          elements.push(<h1 key={i} dangerouslySetInnerHTML={{ __html: parsedContent }} />)
           break
         case 2:
-          elements.push(<h2 key={i}>{content}</h2>)
+          elements.push(<h2 key={i} dangerouslySetInnerHTML={{ __html: parsedContent }} />)
           break
         case 3:
-          elements.push(<h3 key={i}>{content}</h3>)
+          elements.push(<h3 key={i} dangerouslySetInnerHTML={{ __html: parsedContent }} />)
           break
         default:
-          elements.push(<h4 key={i}>{content}</h4>)
+          elements.push(<h4 key={i} dangerouslySetInnerHTML={{ __html: parsedContent }} />)
           break
       }
     }
@@ -51,10 +67,10 @@ const parseMarkdown = (text: string): JSX.Element[] => {
     }
     // 列表项
     else if (line.match(/^-\s/)) {
+      const content = line.replace(/^-\s/, '')
+      const parsedContent = parseInlineFormatting(content)
       elements.push(
-        <li key={i} className="list-item">
-          {line.replace(/^-\s/, '')}
-        </li>
+        <li key={i} className="list-item" dangerouslySetInnerHTML={{ __html: parsedContent }} />
       )
     }
     // 链接
@@ -73,13 +89,9 @@ const parseMarkdown = (text: string): JSX.Element[] => {
     }
     // 普通段落
     else if (line.trim()) {
-      // 处理粗体和斜体
-      let processedLine = line
-        .replace(/\*\*(.*?)\*\*/g, '<strong>$1</strong>')
-        .replace(/\*(.*?)\*/g, '<em>$1</em>')
-      
+      const parsedContent = parseInlineFormatting(line)
       elements.push(
-        <p key={i} dangerouslySetInnerHTML={{ __html: processedLine }} />
+        <p key={i} dangerouslySetInnerHTML={{ __html: parsedContent }} />
       )
     }
     // 空行
@@ -98,9 +110,25 @@ export default function ChatBox({ sessionId, onSessionCreated, onConversationUpd
   const [error, setError] = useState('')
   const activeSessionRef = useRef<string | null>(sessionId)
   const messagesEndRef = useRef<HTMLDivElement>(null)
+  const abortControllerRef = useRef<AbortController | null>(null)
 
   useEffect(() => {
+    // 检查是否是从 null 变为新会话
+    const wasNull = activeSessionRef.current === null
     activeSessionRef.current = sessionId
+    
+    // 只有当不是从 null 变为新会话时才取消流
+    // 这样可以避免中断第一个消息的回复
+    if (!wasNull && abortControllerRef.current) {
+      abortControllerRef.current.abort()
+      abortControllerRef.current = null
+    }
+    
+    // 重置状态，但保留 loading 状态
+    // 因为 loading 状态由 handleSend 控制，不应该在会话切换时重置
+    setInputValue('')
+    setError('')
+    
     if (!sessionId) {
       setMessages([])
       return
@@ -137,10 +165,25 @@ export default function ChatBox({ sessionId, onSessionCreated, onConversationUpd
     setInputValue('')
     setMessages((prev) => [...prev, { role: 'user', content: userText }, { role: 'assistant', content: '' }])
 
+    // 取消之前的请求
+    if (abortControllerRef.current) {
+      abortControllerRef.current.abort()
+    }
+    
+    // 创建新的 AbortController
+    const abortController = new AbortController()
+    abortControllerRef.current = abortController
+
     try {
       await sendChatStream(
         { message: userText, session_id: activeSessionRef.current || undefined },
         (data) => {
+          // 检查当前会话是否仍然是活跃会话
+          // 对于新会话，我们需要允许消息处理，即使 sessionId 发生了变化
+          if (activeSessionRef.current !== sessionId && sessionId !== null) {
+            return
+          }
+          
           if (data.type === 'session' && typeof data.session_id === 'string') {
             onSessionCreated(data.session_id)
           }
@@ -149,12 +192,17 @@ export default function ChatBox({ sessionId, onSessionCreated, onConversationUpd
           }
         },
         () => {
-          setLoading(false)
-          onConversationUpdated()
+          if (activeSessionRef.current === sessionId || sessionId === null) {
+            setLoading(false)
+            onConversationUpdated()
+          }
         },
+        abortController
       )
     } catch (err) {
-      setError('发送失败，请检查后端服务和网络连接。')
+      if (err.name !== 'AbortError') {
+        setError('发送失败，请检查后端服务和网络连接。')
+      }
       setLoading(false)
     }
   }

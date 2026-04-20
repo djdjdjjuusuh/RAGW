@@ -74,11 +74,13 @@ export async function sendChatStream(
   payload: ChatRequestPayload,
   onEvent: (data: Record<string, unknown>) => void,
   onDone: () => void,
+  abortController?: AbortController
 ): Promise<void> {
   const response = await fetch(`${API_BASE}/api/chat`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify(payload),
+    signal: abortController?.signal,
   })
 
   if (!response.body) {
@@ -90,33 +92,53 @@ export async function sendChatStream(
   let buffer = ''
   let doneCalled = false
 
-  while (true) {
-    const { done, value } = await reader.read()
-    if (done) break
-    buffer += decoder.decode(value, { stream: true })
-
-    const parts = buffer.split('\n\n')
-    buffer = parts.pop() || ''
-
-    for (const part of parts) {
-      const lines = part.split('\n').filter(Boolean)
-      const dataLine = lines.find((line) => line.startsWith('data:'))
-      if (!dataLine) continue
-
-      const raw = dataLine.slice(5).trim()
-      try {
-        const data = JSON.parse(raw)
-        if (data.type === 'done') {
-          if (!doneCalled) {
-            doneCalled = true
-            onDone()
-          }
-        } else {
-          onEvent(data)
-        }
-      } catch (error) {
-        console.warn('解析 SSE 数据失败', error)
+  try {
+    while (true) {
+      // 检查是否被中止
+      if (abortController?.signal.aborted) {
+        break
       }
+
+      const { done, value } = await reader.read()
+      if (done) break
+      buffer += decoder.decode(value, { stream: true })
+
+      const parts = buffer.split('\n\n')
+      buffer = parts.pop() || ''
+
+      for (const part of parts) {
+        const lines = part.split('\n').filter(Boolean)
+        const dataLine = lines.find((line) => line.startsWith('data:'))
+        if (!dataLine) continue
+
+        const raw = dataLine.slice(5).trim()
+        try {
+          const data = JSON.parse(raw)
+          if (data.type === 'done') {
+            if (!doneCalled) {
+              doneCalled = true
+              onDone()
+            }
+          } else {
+            onEvent(data)
+          }
+        } catch (error) {
+          console.warn('解析 SSE 数据失败', error)
+        }
+      }
+    }
+  } catch (error) {
+    if (error.name === 'AbortError') {
+      // 正常的中止，不抛出错误
+      return
+    }
+    throw error
+  } finally {
+    // 确保关闭 reader
+    try {
+      await reader.cancel()
+    } catch (error) {
+      console.warn('关闭 reader 失败', error)
     }
   }
 
