@@ -89,7 +89,16 @@ const parseMarkdown = (text: string): JSX.Element[] => {
     }
     // 普通段落
     else if (line.trim()) {
-      const parsedContent = parseInlineFormatting(line)
+      // 处理粗体和斜体，确保正确处理组合情况
+      let processedLine = line
+        // 先处理粗体
+        .replace(/\*\*(.*?)\*\*/g, '<strong>$1</strong>')
+        // 再处理斜体
+        .replace(/\*(.*?)\*/g, '<em>$1</em>')
+        // 处理粗体和斜体的组合
+        .replace(/<strong>(.*?)<\/strong>：<em>(.*?)<\/em>/g, '<strong>$1</strong>：<em>$2</em>')
+        .replace(/<strong>(.*?)<\/strong>\s*[:：]\s*<em>(.*?)<\/em>/g, '<strong>$1</strong>：<em>$2</em>')
+      
       elements.push(
         <p key={i} dangerouslySetInnerHTML={{ __html: parsedContent }} />
       )
